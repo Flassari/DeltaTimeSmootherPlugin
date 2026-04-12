@@ -16,7 +16,10 @@ public:
 
 private:
 	void OnSamplingInput();
+
 	double SmoothDeltaTime(double RawDeltaTime);
+	void MitigateHitchesDeltaSmoothing();
+	void AbsorbHitchesDeltaSmoothing();
 
 	FDelegateHandle SamplingInputHandle;
 
@@ -24,4 +27,7 @@ private:
 	static constexpr int32 SmoothBufferSize = 10;
 	double SmoothBuffer[SmoothBufferSize] = {};
 	bool bSmoothBufferInitialized = false;
+
+	// How many frames of hitch mitigation are left. Otherwise default to hitch absorption.
+	int32 HitchMitigationFrames = 0;
 };

@@ -17,6 +17,7 @@ public class DeltaTimeSmoother : ModuleRules
 		{
 			"CoreUObject",
 			"Engine",
+			"RHI",
 		});
 	}
 }

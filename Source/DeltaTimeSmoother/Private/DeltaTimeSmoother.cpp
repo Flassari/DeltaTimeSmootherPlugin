@@ -7,6 +7,11 @@
 #include "Modules/ModuleManager.h"
 #include "RHIUtilities.h"
 
+#include "SlateIM.h"
+#include "UnrealEngine.h"
+#include "Engine/World.h"
+#include "Engine/GameViewportClient.h"  
+
 static TAutoConsoleVariable<int32> CVarEnabled(
 	TEXT("DTS.Enabled"),
 	1,
@@ -16,8 +21,22 @@ static TAutoConsoleVariable<int32> CVarEnabled(
 
 static TAutoConsoleVariable<float> CVarMitigationThreshold(
 	TEXT("DTS.MitigationThreshold"),
+	0.07f,
+	TEXT("The maximum delta time in seconds before hitch mitigation kicks in. 0 to disable. (Default: 0.07)"),
+	ECVF_Default
+);
+
+static TAutoConsoleVariable<float> CVarPassthroughThreshold(
+	TEXT("DTS.PassthroughThreshold"),
 	0.1f,
-	TEXT("The maximum delta time in seconds before hitch mitigation kicks in. (Default: 0.1)"),
+	TEXT("No smoothing or mitigation will be performed on hitches over this delta time threshold. 0 to disable. (Default: 0.1)"),
+	ECVF_Default
+);
+
+static TAutoConsoleVariable<int32> CVarDebugView(
+	TEXT("DTS.DebugView"),
+	0,
+	TEXT("Enable (1) or disable (0, default) the debug view."),
 	ECVF_Default
 );
 
@@ -31,6 +50,8 @@ void FDeltaTimeSmootherModule::StartupModule()
 	// An even better hook might be ILatencyMarkerModule::SetSimulationLatencyMarkerStart, as it is called
 	// immediately after UpdateTimeAndHandleMaxTickRate().
 	SamplingInputHandle = FCoreDelegates::OnSamplingInput.AddRaw(this, &FDeltaTimeSmootherModule::OnSamplingInput);
+
+	// FModuleManager::LoadModuleChecked<FSlateIMModule>("SlateIMModule");
 }
 
 void FDeltaTimeSmootherModule::ShutdownModule()
@@ -49,11 +70,31 @@ void FDeltaTimeSmootherModule::OnSamplingInput()
 	}
 
 	const double RawDeltaTime = FApp::GetDeltaTime();
-	const double Output = SmoothDeltaTime(RawDeltaTime);
+	double OutputDeltaTime = RawDeltaTime;
+	
+	// Bigger hitches pass through. They can't be smoothed without speeding up too many frames.
+	const double PassthroughThreshold = CVarPassthroughThreshold.GetValueOnGameThread();
+	if (PassthroughThreshold > 0 && RawDeltaTime >= PassthroughThreshold)
+	{
+		// Average the other timings in the buffer.
+		MitigateHitchesDeltaSmoothing();
+		// Stop mitigating if it was active.
+		HitchMitigationFrames = 0;
+	}
+	else
+	{
+		OutputDeltaTime = SmoothDeltaTime(RawDeltaTime);
+	}
+
+	if (CVarDebugView.GetValueOnGameThread())
+	{
+		DebugView(RawDeltaTime, OutputDeltaTime);
+	}
+
 	// We adjust deltaTime, but not FApp::CurrentTime. This is on purpose as we don't
 	// want to mess up the App's "real time" for systems that depend on it. But this means that
 	// deltaTime diverges a little bit during smoothing. Take that into account for any systems using both.
-	FApp::SetDeltaTime(Output);
+	FApp::SetDeltaTime(OutputDeltaTime);
 }
 
 
@@ -79,8 +120,8 @@ double FDeltaTimeSmootherModule::SmoothDeltaTime(double RawDeltaTime)
 	}
 	SmoothBuffer[SmoothBufferSize - 1] = RawDeltaTime;
 
-
-	if (RawDeltaTime >= CVarMitigationThreshold.GetValueOnGameThread())
+	const double MitigationThreshold = CVarMitigationThreshold.GetValueOnGameThread();
+	if (MitigationThreshold > 0 && RawDeltaTime >= MitigationThreshold)
 	{
 		// A hitch which we can't absorb was encountered.
 		// Switch to hitch mitigation mode.
@@ -165,6 +206,107 @@ void FDeltaTimeSmootherModule::AbsorbHitchesDeltaSmoothing()
 			}
 		}
 	}
+}
+
+
+void FDeltaTimeSmootherModule::DebugView(double RawDeltaTime, double SmoothedDeltaTime)
+{
+#if !UE_BUILD_SHIPPING
+	if (GEngine && GEngine->GameViewport)
+	{
+		if (SlateIM::BeginViewportRoot("DTSDebugView", GEngine->GameViewport))
+		{
+			SlateIM::HAlign(HAlign_Fill);
+
+			SlateIM::MinWidth(250.f);
+			SlateIM::MaxWidth(250.f);
+			SlateIM::BeginVerticalStack();
+
+			SlateIM::HAlign(HAlign_Fill);
+			SlateIM::Text(TEXT("DeltaTime Smoother"), FColor::Magenta);
+
+			SlateIM::HAlign(HAlign_Fill);
+
+			const double PassthroughThreshold = CVarPassthroughThreshold.GetValueOnGameThread();
+			if (PassthroughThreshold > 0 && RawDeltaTime >= PassthroughThreshold)
+			{
+				SlateIM::Text(TEXT("Mode: Hitch Passthrough"), FColor::Red);
+			}
+			else if (HitchMitigationFrames > 0)
+			{
+				SlateIM::Text(FString::Printf(TEXT("Mode: Hitch Mitigation - frames left: %i"), HitchMitigationFrames), FColor::Orange);
+			}
+			else
+			{
+				SlateIM::Text(TEXT("Mode: Hitch Absorption"), FColor::Blue);
+			}
+
+			SlateIM::HAlign(HAlign_Fill);
+			SlateIM::Text(FString::Printf(TEXT("Raw Delta Time: %f"), RawDeltaTime), FColor::White);
+			SlateIM::HAlign(HAlign_Fill);
+			SlateIM::Text(FString::Printf(TEXT("Smoothed Delta Time: %f"), SmoothedDeltaTime), FColor::White);
+			SlateIM::MinHeight(100.f);
+			SlateIM::MaxHeight(100.f);
+			SlateIM::BeginGraph();
+
+			// Hitch Passthrough line
+			if (PassthroughThreshold > 0 && RawDeltaTime >= PassthroughThreshold)
+			{
+				double GraphHeight = FMath::Max(RawDeltaTime, 0.04);
+				CurrentDebugGraphHeight = FMath::Max(GraphHeight, CurrentDebugGraphHeight);
+
+				TArray<FVector2D> PassthroughLine{ {0, RawDeltaTime}, {1, RawDeltaTime} };
+				SlateIM::GraphLine(PassthroughLine, { .XViewRange = FDoubleRange(0, 1), .YViewRange = FDoubleRange(0, CurrentDebugGraphHeight), .LineColor = FColor::Orange });
+			}
+			else
+			{
+				// Smoothing values
+				TArray<FVector2D> GraphPoints;
+				GraphPoints.Reserve(SmoothBufferSize * 2);
+				double TotalWidth = 100;
+				double MaxValue = 0;
+				double LineWidth = TotalWidth / SmoothBufferSize;
+				GraphPoints.Push({ 0, 0 });
+
+				for (int32 i = 0; i < SmoothBufferSize; i++)
+				{
+					double CurrentX = LineWidth * i;
+					double Value = SmoothBuffer[i];
+					GraphPoints.Push({ CurrentX, Value });
+					GraphPoints.Push({ CurrentX + LineWidth * 0.9, Value });
+					GraphPoints.Push({ CurrentX + LineWidth * 0.9, 0 });
+					GraphPoints.Push({ CurrentX + LineWidth, 0 });
+
+					if (Value > MaxValue)
+					{
+						MaxValue = Value;
+					}
+				}
+
+				double MaxHeight = FMath::Max(MaxValue, 0.04);
+				CurrentDebugGraphHeight = FMath::Max(MaxValue, CurrentDebugGraphHeight);
+
+				SlateIM::GraphLine(GraphPoints, { .XViewRange = FDoubleRange(-3, 100), .YViewRange = FDoubleRange(0, CurrentDebugGraphHeight), .LineColor = FColor::Orange });
+
+				if (MaxHeight < CurrentDebugGraphHeight)
+				{
+					CurrentDebugGraphHeight = FMath::Lerp(CurrentDebugGraphHeight, MaxHeight, 0.1);
+				}
+			}
+
+			// 16.66 ms line guide
+			TArray<FVector2D> Guide60fps{ {0, 0.016666}, {1, 0.016666} };
+			SlateIM::GraphLine(Guide60fps, { .XViewRange = FDoubleRange(0, 1), .YViewRange = FDoubleRange(0, CurrentDebugGraphHeight), .LineColor = FColor::Green });
+			// 33.33 ms line guide
+			TArray<FVector2D> Guide30fps{ {0, 0.033333}, {1, 0.033333} };
+			SlateIM::GraphLine(Guide30fps, { .XViewRange = FDoubleRange(0, 1), .YViewRange = FDoubleRange(0, CurrentDebugGraphHeight), .LineColor = FColor::Red });
+
+			SlateIM::EndGraph();
+			SlateIM::EndVerticalStack();
+		}
+		SlateIM::EndRoot();
+	}
+#endif
 }
 
 IMPLEMENT_MODULE(FDeltaTimeSmootherModule, DeltaTimeSmoother)

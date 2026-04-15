@@ -19,5 +19,11 @@
 			"Type": "Runtime",
 			"LoadingPhase": "PostEngineInit"
 		}
+	],
+	"Plugins": [
+		{
+			"Name": "SlateIM",
+			"Enabled": true
+		}
 	]
 }

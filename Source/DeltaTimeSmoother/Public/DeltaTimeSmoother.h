@@ -21,6 +21,8 @@ private:
 	void MitigateHitchesDeltaSmoothing();
 	void AbsorbHitchesDeltaSmoothing();
 
+	void DebugView(double RawDeltaTime, double SmoothedDeltaTime);
+
 	FDelegateHandle SamplingInputHandle;
 
 	// FIFO buffer. Index 0 = oldest (next to output), index SmoothBufferSize-1 = newest (just inserted).
@@ -30,4 +32,5 @@ private:
 
 	// How many frames of hitch mitigation are left. Otherwise default to hitch absorption.
 	int32 HitchMitigationFrames = 0;
+	double CurrentDebugGraphHeight = 0;
 };

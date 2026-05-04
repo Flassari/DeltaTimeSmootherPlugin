@@ -66,9 +66,15 @@ A better hook point might be via `ILatencyMarkerModule::SetSimulationLatencyMark
 
 ## MaxDeltaTime
 
-Unreal runs uncapped delta times by default, so very large hitches will have extreme recovery. By default, UE will simulate the next frame with an uncapped delta time matching the hitch in size, which is jarring.
+Unreal runs uncapped delta times by default, so very large hitches will have extreme recovery. By default, UE will simulate the next frame with an uncapped delta time matching the hitch in size to keep the game time constant, which can be jarring.
 
-I recommend setting `MaxDeltaTime` to something like 0.3 so that very large hitches don't have such extreme side effects, but your use case may vary. You can do that by putting this into your **DefaultEngine.ini**:
+You can set `MaxDeltaTime` to something like 0.3 so that very large hitches don't have such extreme side effects, but your use case may vary.
+
+> [!CAUTION]
+> Be aware that clamping delta-time during bigger hitches causes audio to drift, as UE's audio runs on its own thread!  
+> The Sequencer has audio-drifting correction built-in.
+
+You can adjust `MaxDeltaTime` in your **DefaultEngine.ini**:
 
     [/Script/Engine.GameEngine]
     MaxDeltaTime=0.3
